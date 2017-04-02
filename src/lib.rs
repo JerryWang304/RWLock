@@ -1,0 +1,388 @@
+/// reader-writer lock
+/// written by Feng Wang 
+
+
+use std::sync::Mutex;
+use std::sync::Condvar;
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
+use std::cmp::PartialEq;
+/// Provides a reader-writer lock to protect data of type `T`
+pub struct RwLock<T> {
+    mutex: Mutex<()>,
+    data: UnsafeCell<T>,
+    // Hao Chen's requirements
+    pref: Preference,
+    order: Order,
+    // conditional variables 
+    read_go: Condvar,
+    write_go: Condvar,
+    // state variables
+    state_vars: UnsafeCell<Vars>,
+}
+
+struct Vars {
+
+    // state variables
+    waiting_readers: Vec<Box<Condvar>>,
+    waiting_writers: Vec<Box<Condvar>>,
+    active_readers: u32,
+    active_writers: u32,
+}
+
+
+#[derive(PartialEq)]
+pub enum Preference {
+    /// Readers-preferred
+    /// * Readers must wait when a writer is active.
+    /// * Writers must wait when a reader is active or waiting, or a writer is active.
+    Reader,
+    /// Writers-preferred: 
+    /// * Readers must wait when a writer is active or waiting.
+    /// * Writer must wait when a reader or writer is active.
+    Writer,
+}
+
+/// In which order to schedule threads
+pub enum Order {
+    /// First in first out
+    Fifo,
+    /// Last in first out
+    Lifo,
+}
+
+impl<T> RwLock<T> {
+    /// Constructs a new `RwLock`
+    ///
+    /// data: the shared object to be protected by this lock
+    /// pref: which preference
+    /// order: in which order to wake up the threads waiting on this lock
+    pub fn new(data: T, pref: Preference, order: Order) -> RwLock<T> {
+
+        RwLock{
+            mutex: Mutex::new(()),
+            data: UnsafeCell::new(data),
+            pref: pref,
+            order: order,
+            read_go: Condvar::new(),
+            write_go: Condvar::new(),
+            state_vars: UnsafeCell::new(
+                Vars {
+                    waiting_readers: Vec::new(),
+                    waiting_writers: Vec::new(),
+                    active_writers: 0,
+                    active_readers: 0,
+
+                })
+
+        }
+    }
+    // when should read wait 
+    fn read_should_wait(&self) -> bool {
+        let state_vars = unsafe{
+            self.state_vars.get()
+        };// *mut T 
+        let  waiting_writers = unsafe{ &((*state_vars).waiting_writers) };// vector
+        let  active_writers = unsafe { (*state_vars).active_writers };
+
+        
+
+        match self.pref {
+            Preference::Reader => {
+                
+                return active_writers > 0;
+            },
+            Preference::Writer => {
+
+                return active_writers > 0 || waiting_writers.len() > 0;
+            }
+        }
+    }
+    // when shold write wait 
+    fn write_should_wait(&self) -> bool {
+        let state_vars = unsafe{
+            self.state_vars.get()
+        };// *mut Vars
+        //let waiting_writers = unsafe{ &((*state_vars).waiting_writers)};// vector
+        let waiting_readers = unsafe{ &((*state_vars).waiting_readers)};// vector
+        let active_readers = unsafe{ (*state_vars).active_readers};
+        let active_writers = unsafe{ (*state_vars).active_writers};
+        match self.pref {
+            Preference::Reader => {
+                return active_readers > 0 || waiting_readers.len() > 0 
+                || active_writers > 0;
+            },
+            Preference::Writer => {
+                return active_writers > 0 || active_readers > 0;
+            }
+        }
+    }
+
+    /// Requests a read lock, waits when necessary, and wakes up at the earliest opportunity
+    /// 
+    /// Always returns Ok(_).
+    /// (We declare this return type to be `Result` to be compatible with `std::sync::RwLock`)
+    pub fn read(&self) -> Result<RwLockReadGuard<T>, ()> {
+        let mut guard = self.mutex.lock().unwrap();
+        let cv = Box::new(Condvar::new());// point to a condvar
+        unsafe{
+            (*self.state_vars.get()).waiting_readers.push(cv);
+        }
+        //self.state_vars.waiting_readers += 1;
+
+        while self.read_should_wait() {
+            guard = self.read_go.wait(guard).unwrap();
+        }
+        // achieve the lock and the condition satisfied
+
+        unsafe {
+
+            (*self.state_vars.get()).waiting_readers.pop();
+            (*self.state_vars.get()).active_readers += 1;
+        }
+
+        Ok(
+            RwLockReadGuard {
+                lock: &self
+            }
+
+        )
+        
+    }
+
+    /// Requests a write lock, and waits when necessary.
+    /// When the lock becomes available,
+    /// * if `order == Order::Fifo`, wakes up the first thread
+    /// * if `order == Order::Lifo`, wakes up the last thread
+    /// 
+    /// Always returns Ok(_).
+    pub fn write(&self) -> Result<RwLockWriteGuard<T>, ()> {
+        let mut gurad = self.mutex.lock().unwrap();
+        let cv = Box::new(Condvar::new());
+        unsafe {
+            (*self.state_vars.get()).waiting_writers.push(cv);
+        }
+        //self.state_vars.waiting_writers += 1;
+        // writer should wait 
+        while self.write_should_wait() {
+            gurad = self.write_go.wait(gurad).unwrap();
+        }
+        // pop the writer from the waiting list
+        unsafe {
+            (*self.state_vars.get()).waiting_writers.pop();
+        }
+        match self.order {
+            Order::Fifo => {
+                unsafe {
+                    let ref mut cvs = (*self.state_vars.get()).waiting_writers;
+                    for cv in cvs {
+                        cv.notify_one();
+                    }
+                }
+            },
+            Order::Lifo => {
+                unsafe {
+                    let ref mut cvs = (*self.state_vars.get()).waiting_writers;
+                    cvs.reverse();
+                    for cv in cvs {
+                        cv.notify_one();
+                    }
+                }
+            }
+        }
+
+        Ok(
+            RwLockWriteGuard {
+                lock: &self
+            }
+        )
+    }
+
+    pub fn wakeup_other_threads(&self) {
+        match self.pref {
+            Preference::Reader => {
+                    // first weak readers
+                unsafe {
+                    let ref mut waiting_readers =  (*self.state_vars.get()).waiting_readers;// vector
+                    let ref mut waiting_writers =  (*self.state_vars.get()).waiting_writers;
+                    match self.order {
+                        Order::Lifo => {
+                            waiting_writers.reverse();
+                            waiting_readers.reverse();
+                        },
+                        _ => {},
+                    }
+                    if waiting_readers.len() > 0{
+
+                        for cv in waiting_readers {
+                            cv.notify_one();
+                        }
+                    }
+
+                    // then weak writers
+                    // vector
+                    if waiting_writers.len() > 0 {
+
+                        for cv in waiting_writers {
+                            cv.notify_one();
+                        }
+                        
+                    }    
+                }            
+            },
+            Preference::Writer => {
+                // first weak writers
+                unsafe {
+                    let ref mut waiting_writers = (*self.state_vars.get()).waiting_writers;// vector
+                    let ref mut waiting_readers = (*self.state_vars.get()).waiting_readers;// vector
+
+                    match self.order {
+                        Order::Lifo => {
+                            waiting_writers.reverse();
+                            waiting_readers.reverse();
+                        },
+                        _ => {},
+                    }                    
+                    if waiting_writers.len() > 0 {
+                        
+                        for cv in waiting_writers {
+                            cv.notify_one();
+                        }
+                        
+                    }
+                    // then weak readers
+                    if waiting_readers.len() > 0{
+                        for cv in waiting_readers {
+                            cv.notify_one();
+                        }
+                    }                 
+                }
+            }
+        }
+    }
+    // function end 
+}
+
+/// Declares that it is safe to send and reference `RwLock` between threads safely
+unsafe impl<T: Send + Sync> Send for RwLock<T> {}
+unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
+
+/// A read guard for `RwLock`
+pub struct RwLockReadGuard<'a, T: 'a> {
+    lock: &'a RwLock<T>
+}
+
+/// Provides access to the shared object
+impl<'a, T> Deref for RwLockReadGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe {
+            &*self.lock.data.get()
+        }
+    }
+    
+}
+
+/// Releases the read lock
+impl<'a, T> Drop for RwLockReadGuard<'a, T> {
+
+    fn drop(&mut self) {
+        let mut guard = self.lock.mutex.lock().unwrap();
+        unsafe{ if (*self.lock.state_vars.get()).active_writers > 0 {
+            (*self.lock.state_vars.get()).active_writers -= 1;
+        }}
+        self.lock.wakeup_other_threads();
+    }
+}
+
+/// A write guard for `RwLock`
+pub struct RwLockWriteGuard<'a, T: 'a> {
+    lock : &'a  RwLock<T>
+}
+
+/// Provides access to the shared object
+impl<'a, T> Deref for RwLockWriteGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { 
+            &*self.lock.data.get() 
+        }
+    }
+    
+}
+
+/// Provides access to the shared object
+impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
+
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { 
+            &mut *self.lock.data.get() 
+        }
+    }
+}
+
+/// Releases the write lock
+impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
+    fn drop(&mut self) {
+        let mut guard = self.lock.mutex.lock().unwrap();
+        unsafe{ if (*self.lock.state_vars.get()).active_writers > 0 {
+            (*self.lock.state_vars.get()).active_writers -= 1;
+        }}
+        self.lock.wakeup_other_threads();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use std::sync::Arc;
+    #[test]
+    fn test_rw_arc() {
+        let arc = Arc::new(RwLock::new(0, Preference::Writer, Order::Lifo));
+        let arc2 = arc.clone();
+        let (tx, rx) = channel();
+
+        thread::spawn(move|| {
+            println!("writer spawned!");
+            let mut lock = arc2.write().unwrap();
+            println!("writer active!");
+            for _ in 0..10 {
+                let tmp = *lock;
+                *lock = -1;
+                thread::yield_now();
+                *lock = tmp + 1;
+            }
+            tx.send(()).unwrap();
+            println!("writer inactive!")
+        });
+
+        // Readers try to catch the writer in the act
+        let mut children = Vec::new();
+        for _ in 0..5 {
+            let arc3 = arc.clone();
+            children.push(thread::spawn(move|| {
+                println!("reader spawned!");
+                let lock = arc3.read().unwrap();
+                println!("reader active!");
+                println!("{}",*lock >= 0);
+                assert!(*lock >= 0);
+
+                println!("reader inactive!")
+            }));
+        }
+
+        // Wait for children to pass their asserts
+        for r in children {
+            assert!(r.join().is_ok());
+        }
+
+        // Wait for writer to finish
+        rx.recv().unwrap();
+        let lock = arc.read().unwrap();
+        assert_eq!(*lock, 10);
+    }
+}
+
