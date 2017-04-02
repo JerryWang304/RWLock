@@ -129,12 +129,12 @@ impl<T> RwLock<T> {
         unsafe{
             (*self.state_vars.get()).waiting_readers.push(cv);
         }
-        //self.state_vars.waiting_readers += 1;
+        
 
         while self.read_should_wait() {
             guard = self.read_go.wait(guard).unwrap();
         }
-        // achieve the lock and the condition satisfied
+        
 
         unsafe {
 
@@ -176,18 +176,25 @@ impl<T> RwLock<T> {
             Order::Fifo => {
                 unsafe {
                     let ref mut cvs = (*self.state_vars.get()).waiting_writers;
-                    for cv in cvs {
-                        cv.notify_one();
+                    //for cv in cvs {
+                    //    cv.notify_one();
+                    //}
+                    if cvs.len() > 0 {
+                        cvs[0].notify_one();
                     }
                 }
             },
             Order::Lifo => {
                 unsafe {
                     let ref mut cvs = (*self.state_vars.get()).waiting_writers;
-                    cvs.reverse();
-                    for cv in cvs {
-                        cv.notify_one();
+                    if cvs.len() > 0 {
+                        cvs.reverse();
+                        cvs[0].notify_one();
                     }
+                    
+                    //for cv in cvs {
+                    //    cv.notify_one();
+                    //}
                 }
             }
         }
@@ -213,20 +220,20 @@ impl<T> RwLock<T> {
                         },
                         _ => {},
                     }
-                    if waiting_readers.len() > 0{
-
-                        for cv in waiting_readers {
-                            cv.notify_one();
-                        }
+                    if waiting_readers.len() > 0 {
+                        waiting_readers[0].notify_one();
+                        //for cv in waiting_readers {
+                        //    cv.notify_one();
+                        //}
                     }
 
                     // then weak writers
                     // vector
-                    if waiting_writers.len() > 0 {
-
-                        for cv in waiting_writers {
-                            cv.notify_one();
-                        }
+                    else if waiting_writers.len() > 0 {
+                        waiting_writers[0].notify_one();
+                        // for cv in waiting_writers {
+                        //     cv.notify_one();
+                        // }
                         
                     }    
                 }            
@@ -245,17 +252,18 @@ impl<T> RwLock<T> {
                         _ => {},
                     }                    
                     if waiting_writers.len() > 0 {
-                        
-                        for cv in waiting_writers {
-                            cv.notify_one();
-                        }
+                        waiting_writers[0].notify_one();
+                        // for cv in waiting_writers {
+                        //     cv.notify_one();
+                        // }
                         
                     }
                     // then weak readers
-                    if waiting_readers.len() > 0{
-                        for cv in waiting_readers {
-                            cv.notify_one();
-                        }
+                    else if waiting_readers.len() > 0 {
+                        waiting_readers[0].notify_one();
+                        // for cv in waiting_readers {
+                        //     cv.notify_one();
+                        // }
                     }                 
                 }
             }
@@ -289,9 +297,11 @@ impl<'a, T> Drop for RwLockReadGuard<'a, T> {
 
     fn drop(&mut self) {
         let mut guard = self.lock.mutex.lock().unwrap();
-        unsafe{ if (*self.lock.state_vars.get()).active_writers > 0 {
-            (*self.lock.state_vars.get()).active_writers -= 1;
-        }}
+        unsafe{ 
+            if (*self.lock.state_vars.get()).active_readers > 0 {
+                (*self.lock.state_vars.get()).active_readers -= 1;
+            }
+        }
         self.lock.wakeup_other_threads();
     }
 }
@@ -327,12 +337,15 @@ impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
 impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         let mut guard = self.lock.mutex.lock().unwrap();
-        unsafe{ if (*self.lock.state_vars.get()).active_writers > 0 {
-            (*self.lock.state_vars.get()).active_writers -= 1;
-        }}
+        unsafe{ 
+            if (*self.lock.state_vars.get()).active_writers > 0 {
+                (*self.lock.state_vars.get()).active_writers -= 1;
+            }
+        }
         self.lock.wakeup_other_threads();
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +354,7 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn test_rw_arc() {
-        let arc = Arc::new(RwLock::new(0, Preference::Writer, Order::Lifo));
+        let arc = Arc::new(RwLock::new(0, Preference::Reader, Order::Fifo));
         let arc2 = arc.clone();
         let (tx, rx) = channel();
 
