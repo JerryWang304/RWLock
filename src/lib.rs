@@ -290,23 +290,24 @@ impl<'a, T> Drop for RwLockReadGuard<'a, T> {
             if (*self.lock.state_vars.get()).active_readers > 0 {
                 (*self.lock.state_vars.get()).active_readers -= 1;
             }
-            if (*self.lock.state_vars.get()).active_readers == 0 
-                && (*self.lock.state_vars.get()).waiting_writers.len() > 0 {
-                    let ref mut waiting_writers = (*self.lock.state_vars.get()).waiting_writers;
-                    let len = waiting_writers.len();
-                    match self.lock.order {
-                        Order::Fifo => {
-                            // wake up the first waiting writer 
-                            waiting_writers[0].notify_one();
+            self.lock.wakeup_other_threads();
+            // if (*self.lock.state_vars.get()).active_readers == 0 
+            //     && (*self.lock.state_vars.get()).waiting_writers.len() > 0 {
+            //         let ref mut waiting_writers = (*self.lock.state_vars.get()).waiting_writers;
+            //         let len = waiting_writers.len();
+            //         match self.lock.order {
+            //             Order::Fifo => {
+            //                 // wake up the first waiting writer 
+            //                 waiting_writers[0].notify_one();
 
-                        },
-                        Order::Lifo => {
-                            waiting_writers[len-1].notify_one();
-                        }
-                    }
-                    // not sure
-                    self.lock.write_go.notify_all();
-                } 
+            //             },
+            //             Order::Lifo => {
+            //                 waiting_writers[len-1].notify_one();
+            //             }
+            //         }
+            //         // not sure
+            //         self.lock.write_go.notify_all();
+            //     } 
         }
         //self.lock.wakeup_other_threads();
     }
@@ -365,7 +366,7 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn test_rw_arc() {
-        let arc = Arc::new(RwLock::new(0, Preference::Writer, Order::Fifo));
+        let arc = Arc::new(RwLock::new(0, Preference::Reader, Order::Fifo));
         let arc2 = arc.clone();
         let (tx, rx) = channel();
 
