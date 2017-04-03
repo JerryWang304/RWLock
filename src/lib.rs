@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use std::sync::Condvar;
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
-use std::cmp::PartialEq;
+
+
 /// Provides a reader-writer lock to protect data of type `T`
 pub struct RwLock<T> {
     mutex: Mutex<()>,
@@ -80,13 +80,10 @@ impl<T> RwLock<T> {
     }
     // when should read wait 
     fn read_should_wait(&self) -> bool {
-        let state_vars = unsafe{
-            self.state_vars.get()
-        };// *mut T 
+        let  state_vars = self.state_vars.get();// *mut T 
         let  waiting_writers = unsafe{ &((*state_vars).waiting_writers) };// vector
         let  active_writers = unsafe { (*state_vars).active_writers };
 
-        
 
         match self.pref {
             Preference::Reader => {
@@ -98,12 +95,11 @@ impl<T> RwLock<T> {
                 return active_writers > 0 || waiting_writers.len() > 0;
             }
         }
+
     }
     // when shold write wait 
     fn write_should_wait(&self) -> bool {
-        let state_vars = unsafe{
-            self.state_vars.get()
-        };// *mut Vars
+        let state_vars = self.state_vars.get();// *mut Vars
         //let waiting_writers = unsafe{ &((*state_vars).waiting_writers)};// vector
         let waiting_readers = unsafe{ &((*state_vars).waiting_readers)};// vector
         let active_readers = unsafe{ (*state_vars).active_readers};
@@ -140,6 +136,7 @@ impl<T> RwLock<T> {
 
             (*self.state_vars.get()).waiting_readers.pop();
             (*self.state_vars.get()).active_readers += 1;
+
         }
 
         Ok(
@@ -158,7 +155,7 @@ impl<T> RwLock<T> {
     /// 
     /// Always returns Ok(_).
     pub fn write(&self) -> Result<RwLockWriteGuard<T>, ()> {
-        let mut gurad = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock().unwrap();
         let cv = Box::new(Condvar::new());
         unsafe {
             (*self.state_vars.get()).waiting_writers.push(cv);
@@ -166,37 +163,13 @@ impl<T> RwLock<T> {
         //self.state_vars.waiting_writers += 1;
         // writer should wait 
         while self.write_should_wait() {
-            gurad = self.write_go.wait(gurad).unwrap();
+            guard = self.write_go.wait(guard).unwrap();
         }
+
         // pop the writer from the waiting list
         unsafe {
             (*self.state_vars.get()).waiting_writers.pop();
-        }
-        match self.order {
-            Order::Fifo => {
-                unsafe {
-                    let ref mut cvs = (*self.state_vars.get()).waiting_writers;
-                    //for cv in cvs {
-                    //    cv.notify_one();
-                    //}
-                    if cvs.len() > 0 {
-                        cvs[0].notify_one();
-                    }
-                }
-            },
-            Order::Lifo => {
-                unsafe {
-                    let ref mut cvs = (*self.state_vars.get()).waiting_writers;
-                    if cvs.len() > 0 {
-                        cvs.reverse();
-                        cvs[0].notify_one();
-                    }
-                    
-                    //for cv in cvs {
-                    //    cv.notify_one();
-                    //}
-                }
-            }
+            (*self.state_vars.get()).active_writers += 1;
         }
 
         Ok(
@@ -209,33 +182,42 @@ impl<T> RwLock<T> {
     pub fn wakeup_other_threads(&self) {
         match self.pref {
             Preference::Reader => {
-                    // first weak readers
+                // first weak readers
                 unsafe {
                     let ref mut waiting_readers =  (*self.state_vars.get()).waiting_readers;// vector
                     let ref mut waiting_writers =  (*self.state_vars.get()).waiting_writers;
                     match self.order {
                         Order::Lifo => {
-                            waiting_writers.reverse();
-                            waiting_readers.reverse();
+                            // waiting_writers.reverse();
+                            // waiting_readers.reverse();
+                            if waiting_readers.len() > 0 {
+                                //wake up all the readers
+                                let len = waiting_readers.len();
+                                for i in 0..len {
+                                    waiting_readers[len-1-i].notify_one();
+                                }
+                                self.read_go.notify_all();
+                            }else if waiting_writers.len() > 0 {
+                                // wake up just one writer 
+                                waiting_writers[waiting_writers.len()-1].notify_one();
+                                self.write_go.notify_all();
+                            }
                         },
-                        _ => {},
-                    }
-                    if waiting_readers.len() > 0 {
-                        waiting_readers[0].notify_one();
-                        //for cv in waiting_readers {
-                        //    cv.notify_one();
-                        //}
-                    }
+                        Order::Fifo => {
+                            if waiting_readers.len() > 0 {
+                                //wake up all the readers
+                                let len = waiting_readers.len();
+                                for i in 0..len {
+                                    waiting_readers[i].notify_one();
+                                }
+                                self.read_go.notify_all();
 
-                    // then weak writers
-                    // vector
-                    else if waiting_writers.len() > 0 {
-                        waiting_writers[0].notify_one();
-                        // for cv in waiting_writers {
-                        //     cv.notify_one();
-                        // }
-                        
-                    }    
+                            }else if waiting_writers.len() > 0 {
+                                waiting_writers[0].notify_one();
+                                self.write_go.notify_all();
+                            }
+                        },
+                    }
                 }            
             },
             Preference::Writer => {
@@ -246,25 +228,32 @@ impl<T> RwLock<T> {
 
                     match self.order {
                         Order::Lifo => {
-                            waiting_writers.reverse();
-                            waiting_readers.reverse();
+                            //waiting_writers.reverse();
+                            //waiting_readers.reverse();
+                            if waiting_writers.len() > 0 {
+                                waiting_writers[waiting_writers.len()-1].notify_one();
+                                self.write_go.notify_all();
+                            }else if waiting_readers.len() > 0 {
+                                let len = waiting_readers.len();
+                                for i in 0..len {
+                                    waiting_readers[len-1-i].notify_one();
+                                }                     
+                                self.read_go.notify_all();           
+                            }
                         },
-                        _ => {},
-                    }                    
-                    if waiting_writers.len() > 0 {
-                        waiting_writers[0].notify_one();
-                        // for cv in waiting_writers {
-                        //     cv.notify_one();
-                        // }
-                        
-                    }
-                    // then weak readers
-                    else if waiting_readers.len() > 0 {
-                        waiting_readers[0].notify_one();
-                        // for cv in waiting_readers {
-                        //     cv.notify_one();
-                        // }
-                    }                 
+                        Order::Fifo => {
+                            if waiting_writers.len() > 0 {
+                                waiting_writers[0].notify_one();
+                                self.write_go.notify_all();
+                            }else if waiting_readers.len() > 0 {
+                                let len = waiting_readers.len();
+                                for i in 0..len {
+                                    waiting_readers[i].notify_one();
+                                }  
+                                self.read_go.notify_all();                              
+                            }                            
+                        },
+                    }                           
                 }
             }
         }
@@ -296,13 +285,30 @@ impl<'a, T> Deref for RwLockReadGuard<'a, T> {
 impl<'a, T> Drop for RwLockReadGuard<'a, T> {
 
     fn drop(&mut self) {
-        let mut guard = self.lock.mutex.lock().unwrap();
-        unsafe{ 
+        let guard = self.lock.mutex.lock().unwrap();
+        unsafe { 
             if (*self.lock.state_vars.get()).active_readers > 0 {
                 (*self.lock.state_vars.get()).active_readers -= 1;
             }
+            if (*self.lock.state_vars.get()).active_readers == 0 
+                && (*self.lock.state_vars.get()).waiting_writers.len() > 0 {
+                    let ref mut waiting_writers = (*self.lock.state_vars.get()).waiting_writers;
+                    let len = waiting_writers.len();
+                    match self.lock.order {
+                        Order::Fifo => {
+                            // wake up the first waiting writer 
+                            waiting_writers[0].notify_one();
+
+                        },
+                        Order::Lifo => {
+                            waiting_writers[len-1].notify_one();
+                        }
+                    }
+                    // not sure
+                    self.lock.write_go.notify_all();
+                } 
         }
-        self.lock.wakeup_other_threads();
+        //self.lock.wakeup_other_threads();
     }
 }
 
@@ -336,13 +342,18 @@ impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
 /// Releases the write lock
 impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
-        let mut guard = self.lock.mutex.lock().unwrap();
-        unsafe{ 
+        let guard = self.lock.mutex.lock().unwrap();
+        unsafe { 
             if (*self.lock.state_vars.get()).active_writers > 0 {
                 (*self.lock.state_vars.get()).active_writers -= 1;
             }
+            if (*self.lock.state_vars.get()).active_writers == 0 {
+                self.lock.wakeup_other_threads();
+
+            }
         }
-        self.lock.wakeup_other_threads();
+
+        
     }
 }
 
@@ -354,7 +365,7 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn test_rw_arc() {
-        let arc = Arc::new(RwLock::new(0, Preference::Reader, Order::Fifo));
+        let arc = Arc::new(RwLock::new(0, Preference::Writer, Order::Fifo));
         let arc2 = arc.clone();
         let (tx, rx) = channel();
 
