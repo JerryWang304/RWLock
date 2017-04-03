@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use std::sync::Condvar;
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
-
+use std::sync::Arc;
+use std::rc::Rc;
 
 /// Provides a reader-writer lock to protect data of type `T`
 pub struct RwLock<T> {
@@ -25,8 +26,8 @@ pub struct RwLock<T> {
 struct Vars {
 
     // state variables
-    waiting_readers: Vec<Box<Condvar>>,
-    waiting_writers: Vec<Box<Condvar>>,
+    waiting_readers: Vec<Arc<Box<Condvar>>>,
+    waiting_writers: Vec<Arc<Box<Condvar>>>,
     active_readers: u32,
     active_writers: u32,
 }
@@ -107,7 +108,7 @@ impl<T> RwLock<T> {
         match self.pref {
             Preference::Reader => {
                 return active_readers > 0 || waiting_readers.len() > 0 
-                || active_writers > 0;
+                            || active_writers > 0;
             },
             Preference::Writer => {
                 return active_writers > 0 || active_readers > 0;
@@ -121,14 +122,14 @@ impl<T> RwLock<T> {
     /// (We declare this return type to be `Result` to be compatible with `std::sync::RwLock`)
     pub fn read(&self) -> Result<RwLockReadGuard<T>, ()> {
         let mut guard = self.mutex.lock().unwrap();
-        let cv = Box::new(Condvar::new());// point to a condvar
-        unsafe{
-            (*self.state_vars.get()).waiting_readers.push(cv);
+        let cv = Arc::new(Box::new(Condvar::new()));// point to a condvar
+        unsafe {
+            (*self.state_vars.get()).waiting_readers.push(cv.clone());
         }
         
 
         while self.read_should_wait() {
-            guard = self.read_go.wait(guard).unwrap();
+            guard = cv.wait(guard).unwrap();
         }
         
 
@@ -156,14 +157,14 @@ impl<T> RwLock<T> {
     /// Always returns Ok(_).
     pub fn write(&self) -> Result<RwLockWriteGuard<T>, ()> {
         let mut guard = self.mutex.lock().unwrap();
-        let cv = Box::new(Condvar::new());
+        let cv = Arc::new(Box::new(Condvar::new()));
         unsafe {
-            (*self.state_vars.get()).waiting_writers.push(cv);
+            (*self.state_vars.get()).waiting_writers.push(cv.clone());
         }
         //self.state_vars.waiting_writers += 1;
         // writer should wait 
         while self.write_should_wait() {
-            guard = self.write_go.wait(guard).unwrap();
+            guard = cv.wait(guard).unwrap();
         }
 
         // pop the writer from the waiting list
@@ -196,11 +197,11 @@ impl<T> RwLock<T> {
                                 for i in 0..len {
                                     waiting_readers[len-1-i].notify_one();
                                 }
-                                self.read_go.notify_all();
+                                //self.read_go.notify_all();
                             }else if waiting_writers.len() > 0 {
                                 // wake up just one writer 
                                 waiting_writers[waiting_writers.len()-1].notify_one();
-                                self.write_go.notify_one();
+                                //self.write_go.notify_all();
                             }
                         },
                         Order::Fifo => {
@@ -210,11 +211,11 @@ impl<T> RwLock<T> {
                                 for i in 0..len {
                                     waiting_readers[i].notify_one();
                                 }
-                                self.read_go.notify_all();
+                                //self.read_go.notify_all();
 
                             }else if waiting_writers.len() > 0 {
                                 waiting_writers[0].notify_one();
-                                self.write_go.notify_one();
+                                //self.write_go.notify_all();
                             }
                         },
                     }
@@ -232,25 +233,25 @@ impl<T> RwLock<T> {
                             //waiting_readers.reverse();
                             if waiting_writers.len() > 0 {
                                 waiting_writers[waiting_writers.len()-1].notify_one();
-                                self.write_go.notify_one();
+                                //self.write_go.notify_all();
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
                                 for i in 0..len {
                                     waiting_readers[len-1-i].notify_one();
                                 }                     
-                                self.read_go.notify_all();           
+                                //self.read_go.notify_all();           
                             }
                         },
                         Order::Fifo => {
                             if waiting_writers.len() > 0 {
                                 waiting_writers[0].notify_one();
-                                self.write_go.notify_one();
+                                self.write_go.notify_all();
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
                                 for i in 0..len {
                                     waiting_readers[i].notify_one();
                                 }  
-                                self.read_go.notify_all();                              
+                                //self.read_go.notify_all();                              
                             }                            
                         },
                     }                           
@@ -291,25 +292,8 @@ impl<'a, T> Drop for RwLockReadGuard<'a, T> {
                 (*self.lock.state_vars.get()).active_readers -= 1;
             }
             self.lock.wakeup_other_threads();
-            // if (*self.lock.state_vars.get()).active_readers == 0 
-            //     && (*self.lock.state_vars.get()).waiting_writers.len() > 0 {
-            //         let ref mut waiting_writers = (*self.lock.state_vars.get()).waiting_writers;
-            //         let len = waiting_writers.len();
-            //         match self.lock.order {
-            //             Order::Fifo => {
-            //                 // wake up the first waiting writer 
-            //                 waiting_writers[0].notify_one();
-
-            //             },
-            //             Order::Lifo => {
-            //                 waiting_writers[len-1].notify_one();
-            //             }
-            //         }
-            //         // not sure
-            //         self.lock.write_go.notify_all();
-            //     } 
         }
-        //self.lock.wakeup_other_threads();
+        
     }
 }
 
@@ -345,6 +329,7 @@ impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         let guard = self.lock.mutex.lock().unwrap();
         unsafe { 
+
             if (*self.lock.state_vars.get()).active_writers > 0 {
                 (*self.lock.state_vars.get()).active_writers -= 1;
             }
