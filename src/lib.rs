@@ -245,7 +245,7 @@ impl<T> RwLock<T> {
                         Order::Fifo => {
                             if waiting_writers.len() > 0 {
                                 waiting_writers[0].notify_one();
-                                self.write_go.notify_all();
+                                //self.write_go.notify_all();
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
                                 for i in 0..len {
@@ -333,9 +333,9 @@ impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
             if (*self.lock.state_vars.get()).active_writers > 0 {
                 (*self.lock.state_vars.get()).active_writers -= 1;
             }
+            assert_eq!((*self.lock.state_vars.get()).active_writers, 0);
             //if (*self.lock.state_vars.get()).active_writers == 0 
             self.lock.wakeup_other_threads();
-
             
         }   
     }
