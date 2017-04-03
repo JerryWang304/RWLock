@@ -200,7 +200,7 @@ impl<T> RwLock<T> {
                             }else if waiting_writers.len() > 0 {
                                 // wake up just one writer 
                                 waiting_writers[waiting_writers.len()-1].notify_one();
-                                self.write_go.notify_all();
+                                self.write_go.notify_one();
                             }
                         },
                         Order::Fifo => {
@@ -214,7 +214,7 @@ impl<T> RwLock<T> {
 
                             }else if waiting_writers.len() > 0 {
                                 waiting_writers[0].notify_one();
-                                self.write_go.notify_all();
+                                self.write_go.notify_one();
                             }
                         },
                     }
@@ -232,7 +232,7 @@ impl<T> RwLock<T> {
                             //waiting_readers.reverse();
                             if waiting_writers.len() > 0 {
                                 waiting_writers[waiting_writers.len()-1].notify_one();
-                                self.write_go.notify_all();
+                                self.write_go.notify_one();
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
                                 for i in 0..len {
@@ -244,7 +244,7 @@ impl<T> RwLock<T> {
                         Order::Fifo => {
                             if waiting_writers.len() > 0 {
                                 waiting_writers[0].notify_one();
-                                self.write_go.notify_all();
+                                self.write_go.notify_one();
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
                                 for i in 0..len {
@@ -348,13 +348,11 @@ impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
             if (*self.lock.state_vars.get()).active_writers > 0 {
                 (*self.lock.state_vars.get()).active_writers -= 1;
             }
-            if (*self.lock.state_vars.get()).active_writers == 0 {
-                self.lock.wakeup_other_threads();
+            //if (*self.lock.state_vars.get()).active_writers == 0 
+            self.lock.wakeup_other_threads();
 
-            }
-        }
-
-        
+            
+        }   
     }
 }
 
