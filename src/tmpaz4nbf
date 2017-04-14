@@ -19,7 +19,7 @@ pub struct RwLock<T> {
     pref: Preference,
     order: Order,
     // conditional variables 
-    //read_go: Condva,
+    //read_go: Condvar,
     //write_go: Condvar,
     // state variables
     state_vars: UnsafeCell<Vars>,
@@ -113,10 +113,6 @@ impl<T> RwLock<T> {
                             || active_writers > 0;
             },
             Preference::Writer => {
-                //if active_writers > 0 || active_readers > 0 {
-
-                    //println!("write_should_wait satisfied");
-                //}
                 return active_writers > 0 || active_readers > 0;
             }
         }
@@ -139,16 +135,7 @@ impl<T> RwLock<T> {
         
         unsafe {
 
-            //(*self.state_vars.get()).waiting_readers.pop();
-            match self.order {
-                Order::Fifo => {
-                    (*self.state_vars.get()).waiting_readers.remove(0);
-                },
-                Order::Lifo => {
-                    (*self.state_vars.get()).waiting_readers.pop();
-                }
-            }
-
+            (*self.state_vars.get()).waiting_readers.pop();
             (*self.state_vars.get()).active_readers += 1;
 
         }
@@ -168,42 +155,31 @@ impl<T> RwLock<T> {
     /// 
     /// Always returns Ok(_).
     pub fn write(&self) -> Result<RwLockWriteGuard<T>, ()> {
-
-        //println!("before guard");
         let mut guard = self.mutex.lock().unwrap();
-        //println!("after guard");
         let cv = Rc::new(Box::new(Condvar::new()));
         unsafe {
             (*self.state_vars.get()).waiting_writers.push(cv.clone());
         }
- 
-        // unsafe {
-        //     println!("the length of waiting list = {}", (*self.state_vars.get()).waiting_writers.len());
+        //println!("*** push one ***");
+        //self.state_vars.waiting_writers += 1;
+        // writer should wait
+        // unsafe { 
+        //     println!("{:?}", (*self.state_vars.get()).waiting_writers);
         // }
-        //println!("before writer should wait");
+        println!("before writer should wait");
         while self.write_should_wait() {
-            //println!("----  waiting  -----");
+            println!("----  waiting  -----");
             guard = cv.wait(guard).unwrap();
             
         }
-        
 
         // pop the writer from the waiting list
-        // pop wrong !
         unsafe {
-            match self.order {
-                Order::Fifo => {
-                    (*self.state_vars.get()).waiting_writers.remove(0);
-                },
-                Order::Lifo => {
-                    (*self.state_vars.get()).waiting_writers.pop();
-                }
-            }
-            
+            (*self.state_vars.get()).waiting_writers.pop();
             (*self.state_vars.get()).active_writers += 1;
         }
 
-        
+        //println!("*****  Hi  *****");
         Ok(
             RwLockWriteGuard {
                 lock: &self
@@ -213,9 +189,6 @@ impl<T> RwLock<T> {
     }
 
     pub fn wakeup_other_threads(&self) {
-        //unsafe { 
-        //    println!("{:?}", (*self.state_vars.get()).waiting_writers);
-        //}
         match self.pref {
             Preference::Reader => {
                 // firstly weak up readers
@@ -278,9 +251,8 @@ impl<T> RwLock<T> {
                         },
                         Order::Fifo => {
                             if waiting_writers.len() > 0 {
-                                //println!("&&& {} writers are waiting", waiting_writers.len());
                                 waiting_writers[0].notify_one();
-                                //println!("&&&& wake one writer &&&&");
+                                println!("&&&& wake one writer &&&&");
                                 
                             }else if waiting_readers.len() > 0 {
                                 let len = waiting_readers.len();
@@ -364,23 +336,23 @@ impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
 /// Releases the write lock
 impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
-        //println!("***** drop beginning  *****"); 
+        println!("***** drop beginning  *****"); 
         let guard = self.lock.mutex.lock().unwrap();
         unsafe { 
 
             if (*self.lock.state_vars.get()).active_writers > 0 {
-                //println!("**** in active_writers -- ***");
+                println!("**** in active_writers -- ***");
                 (*self.lock.state_vars.get()).active_writers -= 1;
             }
 
             assert_eq!((*self.lock.state_vars.get()).active_writers, 0);
             //if (*self.lock.state_vars.get()).active_writers == 0 
-            //println!("**** before wake up others ****");
+            println!("**** before wake up others ****");
             self.lock.wakeup_other_threads();
-            //println!("**** after wake up others ****");
+            println!("**** Aaft wake up others ****");
 
         }  
-        //println!("***** drop finished  *****"); 
+        println!("***** drop finished  *****"); 
     }
 }
 
@@ -440,7 +412,23 @@ mod tests {
     fn test_multi_writers() {
         let arc = Arc::new(RwLock::new(0, Preference::Writer, Order::Fifo));
         
-   
+        //println!("new data = {:?}", arc.data.get());
+        // let arc2 = arc.clone();
+        // thread::spawn( move || {
+        //     println!("writer {} spawned!",0);
+            
+
+        //     let ten_millis = time::Duration::from_millis(2000);
+        //     let now = time::Instant::now();
+
+        //     thread::sleep(ten_millis);
+
+        //     let mut lock = arc2.write().unwrap();
+        //     println!("writer {} active!", 0);
+        //     *lock += 2;
+        //     println!("data = {} now in thread {}", *lock,0);
+        //     println!("writer {} end!", 0);
+        // });    
         let mut threads = Vec::new();
         for i in 0..3 {
             let arc2 = arc.clone();
